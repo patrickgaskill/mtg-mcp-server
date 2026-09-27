@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gzip
 import json
 import time
 from pathlib import Path
@@ -686,7 +687,7 @@ class TestMetadataValidation:
 
             client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
             async with client:
-                with pytest.raises(ScryfallBulkError, match="missing 'download_uri'"):
+                with pytest.raises(ScryfallBulkError, match="missing 'jsonl_download_uri'"):
                     await client.ensure_loaded()
 
     async def test_non_json_metadata_raises(self):
@@ -719,14 +720,19 @@ class TestParseFailures:
                     await client.ensure_loaded()
 
     async def test_json_object_instead_of_array_raises(self):
-        """JSON object (not array) raises ScryfallBulkError."""
+        """A lone non-card JSON object raises ScryfallBulkError.
+
+        With JSONL support a single object is a valid one-line JSONL file, so
+        this now fails at validation (zero cards parsed) rather than at the
+        array check. It must still raise, not load an empty cache.
+        """
         with respx.mock:
             _mock_metadata_route(respx)
             _mock_download_route(respx, content=b'{"error": "not found"}')
 
             client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
             async with client:
-                with pytest.raises(ScryfallBulkError, match="not a JSON array"):
+                with pytest.raises(ScryfallBulkError, match="Parsed 0 cards"):
                     await client.ensure_loaded()
 
     async def test_all_invalid_cards_raises_zero_parsed(self):
@@ -1032,3 +1038,117 @@ class TestRandomCard:
         card = await loaded_client.random_card(color_identity=frozenset({"R"}))
         if card is not None:
             assert frozenset(card.color_identity).issubset({"R"})
+
+
+# ---------------------------------------------------------------------------
+# JSONL bulk format (Scryfall retired JSON-array bulk files on 2026-07-20)
+# ---------------------------------------------------------------------------
+
+_JSONL_DOWNLOAD_URL = "https://data.scryfall.io/oracle-cards/oracle-cards-20260801090000.jsonl.gz"
+
+
+def _jsonl_metadata() -> dict:
+    """Current Scryfall metadata shape: only ``jsonl_download_uri``, no ``download_uri``."""
+    meta = _load_metadata()
+    del meta["download_uri"]
+    meta["jsonl_download_uri"] = _JSONL_DOWNLOAD_URL
+    meta["compressed_size"] = 12345
+    return meta
+
+
+def _oracle_cards_jsonl_bytes() -> bytes:
+    """The oracle cards fixture re-encoded as JSONL (one card object per line)."""
+    cards = json.loads(_load_oracle_cards())
+    return "\n".join(json.dumps(c) for c in cards).encode() + b"\n"
+
+
+class TestJsonlBulkFormat:
+    """Scryfall now serves bulk files as gzipped JSONL via ``jsonl_download_uri``."""
+
+    async def test_loads_gzipped_jsonl_from_jsonl_download_uri(self):
+        """Metadata with only jsonl_download_uri + gzipped JSONL body loads all cards."""
+        expected = len(json.loads(_load_oracle_cards()))
+        with respx.mock:
+            _mock_metadata_route(respx, metadata=_jsonl_metadata())
+            route = _mock_download_route(
+                respx,
+                url=_JSONL_DOWNLOAD_URL,
+                content=gzip.compress(_oracle_cards_jsonl_bytes()),
+                headers={"Content-Type": "application/gzip"},
+            )
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                await client.ensure_loaded()
+                assert route.called
+                assert len(client._unique_cards) > 0
+                assert len(client._unique_cards) <= expected
+                card = await client.get_card("Sol Ring")
+                assert card is not None
+
+    async def test_prefers_jsonl_download_uri_when_both_present(self):
+        """During the transition both keys existed; the JSONL URL wins."""
+        meta = _jsonl_metadata()
+        meta["download_uri"] = _DOWNLOAD_URL
+        with respx.mock:
+            _mock_metadata_route(respx, metadata=meta)
+            jsonl_route = _mock_download_route(
+                respx,
+                url=_JSONL_DOWNLOAD_URL,
+                content=gzip.compress(_oracle_cards_jsonl_bytes()),
+            )
+            legacy_route = _mock_download_route(respx, url=_DOWNLOAD_URL)
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                await client.ensure_loaded()
+                assert jsonl_route.called
+                assert not legacy_route.called
+
+    async def test_parses_uncompressed_jsonl(self):
+        """Plain (already decompressed) JSONL is accepted too."""
+        with respx.mock:
+            _mock_metadata_route(respx, metadata=_jsonl_metadata())
+            _mock_download_route(
+                respx, url=_JSONL_DOWNLOAD_URL, content=_oracle_cards_jsonl_bytes()
+            )
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                await client.ensure_loaded()
+                assert await client.get_card("Sol Ring") is not None
+
+    async def test_parses_gzipped_json_array(self):
+        """A gzipped legacy JSON array still parses."""
+        with respx.mock:
+            _mock_metadata_route(respx)
+            _mock_download_route(respx, content=gzip.compress(_load_oracle_cards_bytes()))
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                await client.ensure_loaded()
+                assert await client.get_card("Sol Ring") is not None
+
+    async def test_malformed_jsonl_line_raises(self):
+        """A corrupt JSONL line raises ScryfallBulkError rather than crashing."""
+        body = _oracle_cards_jsonl_bytes() + b"{not valid json\n"
+        with respx.mock:
+            _mock_metadata_route(respx, metadata=_jsonl_metadata())
+            _mock_download_route(respx, url=_JSONL_DOWNLOAD_URL, content=gzip.compress(body))
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                with pytest.raises(ScryfallBulkError, match="Failed to parse bulk data"):
+                    await client.ensure_loaded()
+
+    async def test_corrupt_gzip_raises(self):
+        """A truncated gzip stream raises ScryfallBulkError."""
+        truncated = gzip.compress(_oracle_cards_jsonl_bytes())[:200]
+        with respx.mock:
+            _mock_metadata_route(respx, metadata=_jsonl_metadata())
+            _mock_download_route(respx, url=_JSONL_DOWNLOAD_URL, content=truncated)
+
+            client = ScryfallBulkClient(base_url=_BASE_URL, refresh_hours=24)
+            async with client:
+                with pytest.raises(ScryfallBulkError, match="Failed to parse bulk data"):
+                    await client.ensure_loaded()

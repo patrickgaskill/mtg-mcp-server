@@ -192,7 +192,7 @@ Scryfall provides Oracle Cards bulk data — a ~30MB JSON file containing every 
 | Field | Value |
 |-------|-------|
 | URL | Discovered via `https://api.scryfall.com/bulk-data` (Oracle Cards type) |
-| Format | JSON array of card objects — same shape as Scryfall API responses |
+| Format | Gzipped JSONL (one card object per line) via `jsonl_download_uri`; legacy JSON array still parsed — same shape as Scryfall API responses |
 | Contains | name, mana_cost, type_line, oracle_text, colors, color_identity, keywords, power, toughness, prices (USD/EUR/foil), legalities, image_uris, edhrec_rank, rarity, set |
 | Update frequency | Daily |
 

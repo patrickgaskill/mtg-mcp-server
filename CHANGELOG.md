@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Scryfall bulk data loading (#69). Scryfall retired JSON-array bulk files on
+  2026-07-20; bulk metadata now exposes only `jsonl_download_uri`, served as a
+  gzipped JSONL file. The loader now prefers `jsonl_download_uri` (falling back
+  to `download_uri`), decompresses gzip payloads, and streams JSONL line by line
+  while still accepting the legacy JSON array. Restores every bulk-backed tool:
+  `deck_analysis`, `deck_validate`, `suggest_mana_base`, `sealed_pool_build`,
+  and the `bulk_*` tools.
+
 ## [3.0.0] - 2026-04-03
 
 v3.0.0 marks the constructed metagame milestone. The server now covers all major
