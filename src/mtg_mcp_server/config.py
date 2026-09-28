@@ -27,7 +27,9 @@ class Settings(BaseSettings):
 
     # --- Transport ---
     transport: Literal["stdio", "http"] = "stdio"
+    http_host: str = "127.0.0.1"
     http_port: int = 8000
+    http_path: str = "/mcp"
 
     # --- Logging ---
     log_level: str = "INFO"

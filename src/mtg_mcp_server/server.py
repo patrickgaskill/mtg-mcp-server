@@ -12,11 +12,13 @@ data) are conditionally mounted based on ``Settings`` values loaded from ``MTG_M
 from __future__ import annotations
 
 import sys
+from typing import TYPE_CHECKING
 
 import structlog
 from fastmcp import FastMCP
 from fastmcp.server.middleware.response_limiting import ResponseLimitingMiddleware
 from mcp.types import Icon, ToolAnnotations
+from starlette.responses import PlainTextResponse
 
 from mtg_mcp_server import __version__
 from mtg_mcp_server.config import Settings
@@ -31,6 +33,9 @@ from mtg_mcp_server.providers.spellbook import spellbook_mcp
 from mtg_mcp_server.providers.spicerack import spicerack_mcp
 from mtg_mcp_server.services.cache import disable_all_caches
 from mtg_mcp_server.workflows.server import workflow_mcp
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
 
 mcp = FastMCP(
     "MTG",
@@ -165,6 +170,11 @@ async def ping() -> str:
     return "pong"
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> PlainTextResponse:  # pragma: no cover
+    return PlainTextResponse("ok")
+
+
 def main() -> None:  # pragma: no cover
     """Entry point: load settings, configure logging, start transport."""
     try:
@@ -175,7 +185,12 @@ def main() -> None:  # pragma: no cover
             transport = sys.argv[1]
 
         if transport == "http":
-            mcp.run(transport="streamable-http", host="127.0.0.1", port=_settings.http_port)
+            mcp.run(
+                transport="streamable-http",
+                host=_settings.http_host,
+                port=_settings.http_port,
+                path=_settings.http_path,
+            )
         else:
             mcp.run(transport="stdio")
     except KeyboardInterrupt:
